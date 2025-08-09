@@ -2,7 +2,6 @@ import argparse
 import logging
 import timeit
 import torch
-import math
 import csv
 import os
 from cs336_basics.model import BasicsTransformerLM
@@ -69,37 +68,62 @@ def benchmark_model(
     # Timing steps
     logger.info(f"Timing {timing_steps} steps...")
     
-    if backward_pass:
-        def step():
+    # Collect timing measurements
+    forward_times = []
+    backward_times = []
+    total_times = []
+    
+    for _ in range(timing_steps):
+        if backward_pass:
             model.zero_grad(set_to_none=True)
+            
+            # Time forward pass
+            start_time = timeit.default_timer()
             logits = model(batch_data)
             loss = logits.mean()
+            torch.cuda.synchronize()
+            forward_end = timeit.default_timer()
+            
+            # Time backward pass
             loss.backward()
             torch.cuda.synchronize()
-    else:
-        def step():
-            with torch.inference_mode(): # stronger than no_grad, disables autograd & version counters
+            backward_end = timeit.default_timer()
+            
+            forward_times.append(forward_end - start_time)
+            backward_times.append(backward_end - forward_end)
+            total_times.append(backward_end - start_time)
+        else:
+            # Forward only
+            start_time = timeit.default_timer()
+            with torch.inference_mode():
                 _ = model(batch_data)
             torch.cuda.synchronize()
+            end_time = timeit.default_timer()
+            
+            forward_times.append(end_time - start_time)
+            backward_times.append(0)
+            total_times.append(end_time - start_time)
     
-    # Collect individual timing measurements using timeit.default_timer()
-    times = []
-    for _ in range(timing_steps):
-        start_time = timeit.default_timer()
-        step()
-        end_time = timeit.default_timer()
-        times.append(end_time - start_time)
+    # Calculate statistics using torch
+    def calc_stats(times):
+        if not times or all(t == 0 for t in times):
+            return 0, 0, 0
+        times_tensor = torch.tensor(times)
+        std, mean = torch.std_mean(times_tensor)
+        return mean.item(), std.item(), sum(times)
     
-    # Calculate statistics using math
-    mean_time = sum(times) / len(times)
-    variance = sum((t - mean_time) ** 2 for t in times) / len(times)
-    std_time = math.sqrt(variance)
-    total_time = sum(times)
+    total_mean, total_std, total_sum = calc_stats(total_times)
+    forward_mean, forward_std, _ = calc_stats(forward_times)
+    backward_mean, backward_std, _ = calc_stats(backward_times)
     
     return {
-        "total_time": total_time,
-        "avg_time_per_step": mean_time,
-        "std_time_per_step": std_time,
+        "total_time": total_sum,
+        "avg_time_per_step": total_mean,
+        "std_time_per_step": total_std,
+        "avg_forward_time": forward_mean,
+        "std_forward_time": forward_std,
+        "avg_backward_time": backward_mean,
+        "std_backward_time": backward_std,
         "steps": timing_steps
     }
 
@@ -114,7 +138,8 @@ def log_to_csv(args, results, num_params):
     with open(csv_file, 'a', newline='') as f:
         fieldnames = ['model_name', 'mode', 'd_model', 'num_layers', 'num_heads', 'd_ff', 
                      'batch_size', 'sequence_length', 'params_millions', 'warmup_steps', 
-                     'timing_steps', 'total_time', 'avg_time_per_step', 'std_time_per_step']
+                     'timing_steps', 'total_time', 'avg_time_per_step', 'std_time_per_step',
+                     'forward_pass_time', 'backward_pass_time']
         
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         
@@ -137,7 +162,9 @@ def log_to_csv(args, results, num_params):
             'timing_steps': args.timing_steps,
             'total_time': results['total_time'],
             'avg_time_per_step': results['avg_time_per_step'],
-            'std_time_per_step': results['std_time_per_step']
+            'std_time_per_step': results['std_time_per_step'],
+            'forward_pass_time': results['avg_forward_time'],
+            'backward_pass_time': results['avg_backward_time']
         })
     
     logger.info(f"Results logged to {csv_file}")
