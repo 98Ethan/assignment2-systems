@@ -11,7 +11,7 @@ import cs336_basics.model
 from cs336_basics.model import BasicsTransformerLM
 from cs336_basics.optimizer import AdamW
 
-from .nvtx_profiling import annotated_scaled_dot_product_attention
+from cs336_systems.nvtx_profiling import annotated_scaled_dot_product_attention
 
 # Setup logger
 logger = logging.getLogger(__name__)
