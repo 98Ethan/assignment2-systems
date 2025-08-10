@@ -43,21 +43,26 @@ declare -a CONFIGS=(
     "2.7B 2560 32 32 10240"
 )
 
+# Context lengths to sweep
+declare -a CONTEXT_LENGTHS=(128 256 512 1024)
+
 echo "=================================================================="
 
-# Run benchmarks for each configuration
+# Run benchmarks for each configuration and context length
 for config in "${CONFIGS[@]}"; do
     read -r name d_model num_layers num_heads d_ff <<< "$config"
     
-    # Generate filename with model parameters
-    LOG_FILE="$RESULTS_DIR/${MODE_NAME}_d${d_model}_l${num_layers}_h${num_heads}_ff${d_ff}_w${WARMUP_STEPS}_t${TIMING_STEPS}.csv"
-    
-    echo ""
-    echo "BENCHMARKING $name MODEL"
-    echo "Config: d_model=$d_model, num_layers=$num_layers, num_heads=$num_heads, d_ff=$d_ff"
-    echo "Log file: $LOG_FILE"
-    echo "=================================================================="
-    uv run cs336_systems/benchmark.py --model_name $name --d_model $d_model --num_layers $num_layers --num_heads $num_heads --d_ff $d_ff --warmup_steps $WARMUP_STEPS --timing_steps $TIMING_STEPS --log_file $LOG_FILE $BENCHMARK_MODE
+    for context_length in "${CONTEXT_LENGTHS[@]}"; do
+        # Generate filename with model parameters and context length
+        LOG_FILE="$RESULTS_DIR/${MODE_NAME}_d${d_model}_l${num_layers}_h${num_heads}_ff${d_ff}_ctx${context_length}_w${WARMUP_STEPS}_t${TIMING_STEPS}.csv"
+        
+        echo ""
+        echo "BENCHMARKING $name MODEL (context_length=$context_length)"
+        echo "Config: d_model=$d_model, num_layers=$num_layers, num_heads=$num_heads, d_ff=$d_ff, context_length=$context_length"
+        echo "Log file: $LOG_FILE"
+        echo "=================================================================="
+        uv run cs336_systems/benchmark.py --model_name $name --d_model $d_model --num_layers $num_layers --num_heads $num_heads --d_ff $d_ff --context_length $context_length --warmup_steps $WARMUP_STEPS --timing_steps $TIMING_STEPS --log_file $LOG_FILE $BENCHMARK_MODE
+    done
 done
 
 echo ""
