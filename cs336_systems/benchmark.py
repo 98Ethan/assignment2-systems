@@ -9,6 +9,7 @@ import torch.cuda.nvtx as nvtx
 
 import cs336_basics.model
 from cs336_basics.model import BasicsTransformerLM
+from cs336_basics.optimizer import AdamW
 
 from .nvtx_profiling import annotated_scaled_dot_product_attention
 
@@ -47,7 +48,7 @@ def _warmup(model, batch_data, steps, backward_pass):
                 loss.backward()
             torch.cuda.synchronize()
 
-def _time_step(model, batch_data, backward_pass):
+def _time_step(model, batch_data, backward_pass, optimizer=None):
     """Time a single forward/backward step."""
     model.zero_grad(set_to_none=True)
     
@@ -60,7 +61,7 @@ def _time_step(model, batch_data, backward_pass):
         forward_end = timeit.default_timer()
     
     if not backward_pass:
-        return forward_end - start_time, 0
+        return forward_end - start_time, 0, 0
     
     # Backward pass
     with nvtx.range("backward"):
@@ -68,7 +69,13 @@ def _time_step(model, batch_data, backward_pass):
         torch.cuda.synchronize()
         backward_end = timeit.default_timer()
     
-    return forward_end - start_time, backward_end - forward_end
+    if optimizer:
+        with nvtx.range("optimizer"):
+            optimizer.step()
+            torch.cuda.synchronize()
+            optimizer_end = timeit.default_timer()
+    
+    return forward_end - start_time, backward_end - forward_end, optimizer_end - backward_end
 
 def _calc_stats(times):
     """Calculate mean, std, and sum for timing data."""
@@ -82,6 +89,9 @@ def benchmark_model(model, batch_data, warmup_steps=10, timing_steps=100, backwa
     """Benchmark forward and optionally backward passes of the model."""
     model.train()
     
+    # Create optimizer if doing backward pass
+    optimizer = AdamW(model.parameters(), lr=1e-4) if backward_pass else None
+    
     # Warmup
     _warmup(model, batch_data, warmup_steps, backward_pass)
     
@@ -89,14 +99,16 @@ def benchmark_model(model, batch_data, warmup_steps=10, timing_steps=100, backwa
     logger.info(f"Timing {timing_steps} steps...")
     forward_times = []
     backward_times = []
+    optimizer_times = []
     
     for _ in range(timing_steps):
-        forward_time, backward_time = _time_step(model, batch_data, backward_pass)
+        forward_time, backward_time, optimizer_time = _time_step(model, batch_data, backward_pass, optimizer)
         forward_times.append(forward_time)
         backward_times.append(backward_time)
+        optimizer_times.append(optimizer_time)
     
     # Calculate statistics
-    total_times = [f + b for f, b in zip(forward_times, backward_times)]
+    total_times = [f + b + o for f, b, o in zip(forward_times, backward_times, optimizer_times)]
     avg_total, std_total, sum_total = _calc_stats(total_times)
     
     return {
@@ -105,6 +117,7 @@ def benchmark_model(model, batch_data, warmup_steps=10, timing_steps=100, backwa
         "std_time_per_step": std_total,
         "avg_forward_time": sum(forward_times) / len(forward_times),
         "avg_backward_time": sum(backward_times) / len(backward_times) if backward_pass else 0,
+        "avg_optimizer_time": sum(optimizer_times) / len(optimizer_times) if optimizer else 0,
         "steps": timing_steps
     }
 
@@ -120,7 +133,7 @@ def log_to_csv(args, results, num_params):
         fieldnames = ['model_name', 'mode', 'd_model', 'num_layers', 'num_heads', 'd_ff', 
                      'batch_size', 'sequence_length', 'params_millions', 'warmup_steps', 
                      'timing_steps', 'total_time', 'avg_time_per_step', 'std_time_per_step',
-                     'forward_pass_time', 'backward_pass_time']
+                     'forward_pass_time', 'backward_pass_time', 'optimizer_time']
         
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         
@@ -145,7 +158,8 @@ def log_to_csv(args, results, num_params):
             'avg_time_per_step': results['avg_time_per_step'],
             'std_time_per_step': results['std_time_per_step'],
             'forward_pass_time': results['avg_forward_time'],
-            'backward_pass_time': results['avg_backward_time']
+            'backward_pass_time': results['avg_backward_time'],
+            'optimizer_time': results['avg_optimizer_time']
         })
     
     logger.info(f"Results logged to {csv_file}")
