@@ -5,10 +5,46 @@ import torch
 import csv
 import os
 from cs336_basics.model import BasicsTransformerLM
+import cs336_basics.model
+from jaxtyping import Float, Bool
+from torch import Tensor
+import torch.cuda.nvtx as nvtx
 
 # Setup logger
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+
+def annotated_scaled_dot_product_attention(
+    Q: Float[Tensor, " ... queries d_k"],
+    K: Float[Tensor, " ... keys    d_k"],
+    V: Float[Tensor, " ... keys    d_v"],
+    mask: Bool[Tensor, " ... queries keys"] | None = None,
+) -> Float[Tensor, " ... queries d_v"]:
+    """NVTX-annotated version of scaled dot-product attention."""
+    
+    with nvtx.range("scaled_dot_product_attention"):
+        with nvtx.range("computing attention scores"):
+            # Compute attention scores between Q and K
+            import math
+            from einops import einsum
+            d_k = K.shape[-1]
+            attention_scores = einsum(Q, K, "... query d_k, ... key d_k -> ... query key") / math.sqrt(d_k)
+            
+        with nvtx.range("applying mask"):
+            # Apply mask if provided
+            if mask is not None:
+                attention_scores = torch.where(mask, attention_scores, float("-inf"))
+                
+        with nvtx.range("computing softmax"):
+            # Compute softmax of attention scores
+            from cs336_basics.nn_utils import softmax
+            attention_weights = softmax(attention_scores, dim=-1)
+            
+        with nvtx.range("final matmul"):
+            # Compute output projection
+            output = einsum(attention_weights, V, "... query key, ... key d_v ->  ... query d_v")
+            
+    return output
 
 
 def create_model(vocab_size, context_length, d_model, num_layers, num_heads, d_ff, rope_theta):
@@ -53,17 +89,18 @@ def benchmark_model(
     
     # Warmup steps
     logger.info(f"Running {warmup_steps} warmup steps...")
-    for _ in range(warmup_steps):
-        if backward_pass:
-            model.zero_grad(set_to_none=True)
-            logits = model(batch_data)
-            # Simple loss for backward pass
-            loss = logits.mean()
-            loss.backward()
-        else:
-            with torch.no_grad():
+    with nvtx.range("warm-up"):
+        for _ in range(warmup_steps):
+            if backward_pass:
+                model.zero_grad(set_to_none=True)
                 logits = model(batch_data)
-        torch.cuda.synchronize()
+                # Simple loss for backward pass
+                loss = logits.mean()
+                loss.backward()
+            else:
+                with torch.no_grad():
+                    logits = model(batch_data)
+            torch.cuda.synchronize()
     
     # Timing steps
     logger.info(f"Timing {timing_steps} steps...")
@@ -78,31 +115,34 @@ def benchmark_model(
             model.zero_grad(set_to_none=True)
             
             # Time forward pass
-            start_time = timeit.default_timer()
-            logits = model(batch_data)
-            loss = logits.mean()
-            torch.cuda.synchronize()
-            forward_end = timeit.default_timer()
+            with nvtx.range("forward"):
+                start_time = timeit.default_timer()
+                logits = model(batch_data)
+                loss = logits.mean()
+                torch.cuda.synchronize()
+                forward_end = timeit.default_timer()
             
             # Time backward pass
-            loss.backward()
-            torch.cuda.synchronize()
-            backward_end = timeit.default_timer()
-            
-            forward_times.append(forward_end - start_time)
-            backward_times.append(backward_end - forward_end)
-            total_times.append(backward_end - start_time)
+            with nvtx.range("backward"):
+                loss.backward()
+                torch.cuda.synchronize()
+                backward_end = timeit.default_timer()
+                
+                forward_times.append(forward_end - start_time)
+                backward_times.append(backward_end - forward_end)
+                total_times.append(backward_end - start_time)
         else:
             # Forward only
-            start_time = timeit.default_timer()
-            with torch.inference_mode():
-                _ = model(batch_data)
-            torch.cuda.synchronize()
-            end_time = timeit.default_timer()
+            with nvtx.range("forward"):
+                start_time = timeit.default_timer()
+                with torch.inference_mode():
+                    _ = model(batch_data)
+                torch.cuda.synchronize()
+                end_time = timeit.default_timer()
             
-            forward_times.append(end_time - start_time)
-            backward_times.append(0)
-            total_times.append(end_time - start_time)
+                forward_times.append(end_time - start_time)
+                backward_times.append(0)
+                total_times.append(end_time - start_time)
     
     # Calculate statistics using torch
     def calc_stats(times):
@@ -193,6 +233,9 @@ def main():
     
     args = parser.parse_args()
     
+    # Swap the scaled_dot_product_attention function with annotated version
+    cs336_basics.model.scaled_dot_product_attention = annotated_scaled_dot_product_attention
+    
     # Set device to CUDA
     device = torch.device("cuda")
     if not torch.cuda.is_available():
@@ -257,7 +300,7 @@ def main():
     logger.info(f"  Throughput: {1.0 / results['avg_time_per_step']:.2f} steps/second")
     
     # Log results to CSV
-    log_to_csv(args, results, model.get_num_params())
+    # log_to_csv(args, results, model.get_num_params())
     
     logger.info("\n" + "="*50)
     logger.info("BENCHMARK COMPLETED")
