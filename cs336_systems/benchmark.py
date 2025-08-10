@@ -169,7 +169,7 @@ def main():
     parser = argparse.ArgumentParser(description="Benchmark BasicsTransformerLM forward and backward passes")
     
     # Model hyperparameters
-    parser.add_argument("--vocab_size", type=int, default=32000, help="Vocabulary size")
+    parser.add_argument("--vocab_size", type=int, default=10000, help="Vocabulary size")
     parser.add_argument("--context_length", type=int, default=2048, help="Context length")
     parser.add_argument("--d_model", type=int, default=512, help="Model dimension")
     parser.add_argument("--num_layers", type=int, default=6, help="Number of layers")
