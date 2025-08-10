@@ -215,7 +215,7 @@ def main():
     logger.info("Generating random batch...")
     batch_data = generate_random_batch(
         batch_size=args.batch_size,
-        sequence_length=args.sequence_length,
+        sequence_length=args.context_length,
         vocab_size=args.vocab_size,
         device=device
     )
